@@ -1,0 +1,1 @@
+@hourly /home/dev01/IDRV01/scripts.dev/venv/bin/python3 /home/dev01/IDRV01/scripts.dev/python_website_archiver/web-crawler.py /home/dev01/IDRV01/scripts.dev/python_website_archiver/cron.log >> 2>&1
