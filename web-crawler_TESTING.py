@@ -72,7 +72,7 @@ def get_urls_from_sitemap(sitemap_url: str):
     return list(set(urls))
 
 def open_interactive_browser_for_challenge(p, url, state_file, context_args):
-    """Launches a visible browser window for manual Cloudflare resolution."""
+    """Launches a visible browser window for manual Cloudflare/PerimeterX challenge resolution."""
     logging.info("\n" + "="*60)
     logging.info("INTERVENTION REQUIRED: Opening visible browser window for manual solving...")
     logging.info("="*60 + "\n")
@@ -96,7 +96,7 @@ def open_interactive_browser_for_challenge(p, url, state_file, context_args):
     except Exception:
         pass
         
-    logging.info("\nPlease solve the Cloudflare verification / security check in the open browser window.")
+    logging.info("\nPlease solve the verification / security check (Cloudflare / PerimeterX) in the open browser window.")
     input("Press ENTER here after you have successfully passed the challenge...")
     
     try:
@@ -110,8 +110,8 @@ def open_interactive_browser_for_challenge(p, url, state_file, context_args):
     except Exception:
         pass
 
-def handle_cloudflare_challenge(page, browser, p, url, state_file, context_args):
-    """Detects and handles Cloudflare challenges."""
+def handle_security_challenge(page, browser, context, p, url, state_file, context_args):
+    """Detects and handles Cloudflare and PerimeterX security challenges safely, closing old resources."""
     try:
         if page.is_closed():
             return None, None, None
@@ -126,12 +126,17 @@ def handle_cloudflare_challenge(page, browser, p, url, state_file, context_args)
             "Verify you are human" in content or
             "Performing security verification" in content or
             "Managed Challenge" in content or
+            "Access Denied" in content or
+            "Robot or human?" in content or
+            "px-captcha" in content or
+            "perimeterx" in content or
+            "captcha.px-cdn.net" in content or
             ("Cloudflare" in title and ("Verify" in content or "Security" in content))
         )
         
         if is_challenged:
             logging.warning("\n" + "!"*60)
-            logging.warning("[!] Cloudflare challenge / verification screen detected!")
+            logging.warning("[!] Security challenge / Cloudflare / PerimeterX block screen detected!")
             logging.warning("[!] Attempting automated resolution...")
             logging.warning("!"*60 + "\n")
             
@@ -139,7 +144,7 @@ def handle_cloudflare_challenge(page, browser, p, url, state_file, context_args)
             
             try:
                 for frame in page.frames:
-                    if "challenges.cloudflare.com" in frame.url or "cdn-cgi/challenge-platform" in frame.url:
+                    if any(domain in frame.url for domain in ["challenges.cloudflare.com", "cdn-cgi/challenge-platform", "px-cdn.net", "captcha"]):
                         checkbox = frame.locator("input[type='checkbox'], label, span, div[role='checkbox']").first
                         if checkbox.is_visible(timeout=3000):
                             box = checkbox.bounding_box()
@@ -157,18 +162,23 @@ def handle_cloudflare_challenge(page, browser, p, url, state_file, context_args)
                     "!document.body.innerText.includes('Checking your browser') && "
                     "!document.body.innerText.includes('Just a moment...') && "
                     "!document.body.innerText.includes('Verify you are human') && "
+                    "!document.body.innerText.includes('Access Denied') && "
+                    "!document.body.innerText.includes('Robot or human?') && "
                     "!document.body.innerText.includes('Performing security verification')",
                     timeout=25000
                 )
-                logging.info("[+] Cloudflare challenge cleared successfully!")
+                logging.info("[+] Security challenge cleared successfully!")
                 time.sleep(2)
                 return None, None, None
             except Exception:
                 pass
 
             logging.warning("\n[-] Automated resolution timed out. Launching interactive browser...")
+            
             try:
                 page.close()
+                context.close()
+                browser.close()
             except Exception:
                 pass
                 
@@ -186,29 +196,28 @@ def handle_cloudflare_challenge(page, browser, p, url, state_file, context_args)
                 context_args.pop("storage_state", None)
 
             new_context = new_browser.new_context(**context_args)
+            new_context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
             new_page = new_context.new_page()
-            
-            new_page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
             new_page.goto(url, wait_until="domcontentloaded", timeout=60000)
             
             return new_page, new_context, new_browser
             
     except Exception as e:
-        logging.error(f"[-] Error checking Cloudflare challenge: {e}")
+        logging.error(f"[-] Error checking security challenge: {e}")
     return None, None, None
 
 def simulate_human_behavior(page):
-    """Simulates random mouse movements safely."""
+    """Simulates realistic human mouse movements and scrolling."""
     try:
         if not page.is_closed():
-            page.mouse.move(random.randint(150, 600), random.randint(150, 450))
+            page.mouse.move(random.randint(200, 700), random.randint(200, 500), steps=5)
             page.mouse.down()
             page.mouse.up()
     except Exception:
         pass
 
 def download_site_with_anti_adblock(start_url: str, output_dir: str = "site_pages_pdf"):
-    """Crawls a site using sitemaps, skipping already downloaded files and handling navigation shifts safely."""
+    """Crawls a site using sitemaps with strict resource cleanup to prevent host starvation."""
     os.makedirs(output_dir, exist_ok=True)
     state_file = "auth_state.json"
     
@@ -221,6 +230,10 @@ def download_site_with_anti_adblock(start_url: str, output_dir: str = "site_page
         
     logging.info(f"\nFound {len(all_urls)} total URLs in sitemap.\n")
     
+    if not all_urls:
+        logging.error("[-] No URLs found via sitemaps. Please check the target URL.")
+        return
+
     with sync_playwright() as p:
         needs_verification = not os.path.exists(state_file)
         
@@ -243,9 +256,9 @@ def download_site_with_anti_adblock(start_url: str, output_dir: str = "site_page
             context_args["storage_state"] = state_file
             
         context = browser.new_context(**context_args)
-        
         context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
         
+        # Comprehensive Evasions
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => false
@@ -264,6 +277,28 @@ def download_site_with_anti_adblock(start_url: str, output_dir: str = "site_page
             Object.defineProperty(navigator, 'plugins', {
                 get: () => [1, 2, 3, 4, 5]
             });
+
+            try {
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    if (parameter === 37445) {
+                        return 'Intel Inc.';
+                    }
+                    if (parameter === 37446) {
+                        return 'Intel Iris OpenGL Engine';
+                    }
+                    return getParameter(parameter);
+                };
+            } catch (e) {}
+
+            if (navigator.permissions && navigator.permissions.query) {
+                const originalQuery = navigator.permissions.query;
+                navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
+            }
         """)
 
         context.add_init_script("""
@@ -272,20 +307,20 @@ def download_site_with_anti_adblock(start_url: str, output_dir: str = "site_page
             window.mediavineLoaded = true;
         """)
         
-        page = context.new_page()
-        
         if needs_verification:
             logging.info("\n" + "="*60)
             logging.info("ACTION REQUIRED: A browser window has opened.")
-            logging.info("Please solve any initial Cloudflare/security checks.")
+            logging.info("Please solve any initial Cloudflare / security checks.")
             logging.info("Once you can see the normal website content, press ENTER here.")
             logging.info("="*60 + "\n")
             
-            page.goto(start_url, wait_until="domcontentloaded")
+            init_page = context.new_page()
+            init_page.goto(start_url, wait_until="domcontentloaded")
             input("Press ENTER after you have successfully passed the verification...")
             
             context.storage_state(path=state_file)
             logging.info(f"-> Session state saved to {state_file}.")
+            init_page.close()
             
             browser.close()
             browser = p.chromium.launch(
@@ -300,15 +335,14 @@ def download_site_with_anti_adblock(start_url: str, output_dir: str = "site_page
 
             context = browser.new_context(**context_args)
             context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
-            page = context.new_page()
 
         for index, url in enumerate(all_urls, 1):
+            page = None
             try:
-                # Periodically restart browser every 50 pages to prevent RAM bloat/memory leaks
+                # Periodic full memory flush every 50 pages
                 if index > 1 and index % 50 == 0:
                     logging.info("[*] Periodic browser memory flush: restarting browser instance...")
                     try:
-                        page.close()
                         context.close()
                         browser.close()
                     except Exception:
@@ -319,7 +353,6 @@ def download_site_with_anti_adblock(start_url: str, output_dir: str = "site_page
                         context_args["storage_state"] = state_file
                     context = browser.new_context(**context_args)
                     context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
-                    page = context.new_page()
                     gc.collect()
 
                 path_part = urlparse(url).path.strip("/").replace("/", "_")
@@ -336,22 +369,20 @@ def download_site_with_anti_adblock(start_url: str, output_dir: str = "site_page
                         headless=True,
                         args=CHROMIUM_ARGS
                     )
-                    
                     if os.path.exists(state_file):
                         context_args["storage_state"] = state_file
                     else:
                         context_args.pop("storage_state", None)
-
                     context = browser.new_context(**context_args)
                     context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
-                    page = context.new_page()
-                elif page.is_closed():
-                    page = context.new_page()
+
+                # Create a fresh page per URL to prevent renderer memory bloat
+                page = context.new_page()
 
                 logging.info(f"[{index}/{len(all_urls)}] Processing: {url}")
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 
-                new_page, new_ctx, new_brw = handle_cloudflare_challenge(page, browser, p, url, state_file, context_args)
+                new_page, new_ctx, new_brw = handle_security_challenge(page, browser, context, p, url, state_file, context_args)
                 if new_page:
                     page = new_page
                 if new_ctx:
@@ -381,19 +412,36 @@ def download_site_with_anti_adblock(start_url: str, output_dir: str = "site_page
                 
             except Exception as e:
                 logging.error(f"[-] Error processing {url}: {e}")
-                try:
-                    if browser.is_connected() and page.is_closed():
-                        page = context.new_page()
-                except Exception:
-                    pass
-                
+            finally:
+                # Ensure each page instance is explicitly closed immediately after processing
+                if page and not page.is_closed():
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+        
         try:
+            context.close()
             browser.close()
         except Exception:
             pass
         logging.info(f"\nFinished! All PDFs saved in directory: '{output_dir}/'")
 
-	###Add url to target_url field###
 if __name__ == "__main__":
-    target_url = ""
-    download_site_with_anti_adblock(target_url, output_dir="site_pages_pdf")
+    print("=" * 60)
+    print(" PLAYWRIGHT SITE CRAWLER & PDF ARCHIVER ")
+    print("=" * 60)
+    
+    target_url = input("Enter the target website URL (e.g., https://www.dinnerthendessert.com): ").strip()
+    
+    if not target_url:
+        print("[-] Error: No URL provided. Exiting.")
+    else:
+        # Prepend https:// if user omitted scheme
+        if not target_url.startswith(("http://", "https://")):
+            target_url = "https://" + target_url
+            
+        custom_dir = input("Enter output directory for PDFs [default: site_pages_pdf]: ").strip()
+        output_folder = custom_dir if custom_dir else "site_pages_pdf"
+        
+        download_site_with_anti_adblock(target_url, output_dir=output_folder)
